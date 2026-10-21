@@ -12,9 +12,13 @@ if(PGAIN_SANITIZE)
   add_link_options(-fsanitize=address,undefined)
 endif()
 
-add_library(pgain_core src/wire.cpp src/dedup.cpp)
+add_library(pgain_core src/wire.cpp src/dedup.cpp src/udp.cpp src/tunnel.cpp)
 target_include_directories(pgain_core PUBLIC include)
 target_compile_options(pgain_core PRIVATE -Wall -Wextra -Wpedantic)
+
+add_executable(pgain tools/main.cpp)
+target_link_libraries(pgain PRIVATE pgain_core)
+target_compile_options(pgain PRIVATE -Wall -Wextra -Wpedantic)
 
 include(CTest)
 if(BUILD_TESTING)
