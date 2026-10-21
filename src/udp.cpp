@@ -104,7 +104,7 @@ size_t RecvBatch::recv(const Fd& fd) {
     }
 }
 
-SendBatch::SendBatch(size_t capacity) : headers_(capacity), iovs_(capacity), msgs_(capacity) {}
+SendBatch::SendBatch(size_t capacity) : headers_(capacity), tags_(capacity), iovs_(capacity), msgs_(capacity) {}
 
 void SendBatch::add(const sockaddr_in* to, std::span<const std::byte> payload) {
     if (n_ == msgs_.size())
@@ -118,13 +118,15 @@ void SendBatch::add(const sockaddr_in* to, std::span<const std::byte> payload) {
     n_++;
 }
 
-void SendBatch::add(const sockaddr_in* to, const Header& h, std::span<const std::byte> payload) {
+void SendBatch::add(const sockaddr_in* to, const Header& h, std::span<const std::byte> payload, Mac& mac) {
     add(to, payload);
     size_t i = n_ - 1;
     encode(h, headers_[i]);
+    mac.sign(headers_[i], payload, tags_[i]);
     iovs_[i][1] = iovs_[i][0];
     iovs_[i][0] = {headers_[i].data(), header_size};
-    msgs_[i].msg_hdr.msg_iovlen = 2;
+    iovs_[i][2] = {tags_[i].data(), tag_size};
+    msgs_[i].msg_hdr.msg_iovlen = 3;
 }
 
 void SendBatch::flush(const Fd& fd) {

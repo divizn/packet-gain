@@ -10,7 +10,7 @@ jobs:
         sanitize: [OFF, ON]
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get install -y ninja-build
+      - run: sudo apt-get install -y ninja-build libssl-dev
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DPGAIN_SANITIZE=${{ matrix.sanitize }}
       - run: cmake --build build
       - run: ctest --test-dir build --timeout 30 --output-on-failure

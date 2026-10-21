@@ -36,10 +36,14 @@ void wait(const Fd& epoll, int timeout_ms, F&& on_ready) {
         on_ready(evs[i].data);
 }
 
+std::span<const std::byte> payload(std::span<const std::byte> pkt) {
+    return pkt.subspan(header_size, pkt.size() - header_size - tag_size);
 }
 
-Client::Client(const sockaddr_in& listen, const std::vector<sockaddr_in>& paths)
-    : epoll_(make_epoll()), app_(udp_bind(listen)), session_(std::random_device{}()) {
+}
+
+Client::Client(const Key& key, const sockaddr_in& listen, const std::vector<sockaddr_in>& paths)
+    : mac_(key), epoll_(make_epoll()), app_(udp_bind(listen)), session_(std::random_device{}()) {
     if (paths.empty() || paths.size() > max_paths)
         throw Error("need 1 to " + std::to_string(max_paths) + " paths");
     watch(epoll_, app_, {.u64 = 0});
@@ -63,7 +67,7 @@ void Client::from_app() {
         next = seq_;
         for (size_t i = 0; i < n; i++)
             if (auto pkt = app_rx_.packet(i); !pkt.empty())
-                tx_.add(nullptr, {Type::data, uint8_t(p), session_, next++}, pkt);
+                tx_.add(nullptr, {Type::data, uint8_t(p), session_, next++}, pkt, mac_);
         tx_.flush(paths_[p]);
     }
     seq_ = next;
@@ -76,14 +80,15 @@ void Client::from_path(size_t p) {
     for (size_t i = 0; i < n; i++) {
         auto pkt = path_rx_.packet(i);
         auto h = decode(pkt);
-        if (h && h->session == session_ && dedup_.accept(h->seq))
-            tx_.add(&*app_addr_, pkt.subspan(header_size));
+        if (h && h->session == session_ && pkt.size() >= header_size + tag_size && mac_.verify(pkt) &&
+            dedup_.accept(h->seq))
+            tx_.add(&*app_addr_, payload(pkt));
     }
     tx_.flush(app_);
 }
 
-Exit::Exit(const sockaddr_in& listen, const sockaddr_in& target)
-    : target_(target), epoll_(make_epoll()), listen_(udp_bind(listen)) {
+Exit::Exit(const Key& key, const sockaddr_in& listen, const sockaddr_in& target)
+    : mac_(key), target_(target), epoll_(make_epoll()), listen_(udp_bind(listen)) {
     watch(epoll_, listen_, {.ptr = nullptr});
 }
 
@@ -110,15 +115,21 @@ void Exit::from_tunnel() {
     for (size_t i = 0; i < n; i++) {
         auto pkt = rx_.packet(i);
         auto h = decode(pkt);
-        if (!h || h->path >= max_paths)
+        if (!h || h->path >= max_paths || pkt.size() < header_size + tag_size || !mac_.verify(pkt))
             continue;
         Session* s = session(h->session, now);
         if (!s)
             continue;
-        s->paths[h->path] = rx_.from(i);
+        auto& path = s->paths[h->path];
+        if (!path.addr || h->seq > path.newest) {
+            path.addr = rx_.from(i);
+            path.newest = h->seq;
+        }
         s->last_seen = now;
-        if (s->dedup.accept(h->seq))
-            send(s->upstream.get(), pkt.data() + header_size, pkt.size() - header_size, 0);
+        if (s->dedup.accept(h->seq)) {
+            auto body = payload(pkt);
+            send(s->upstream.get(), body.data(), body.size(), 0);
+        }
     }
 }
 
@@ -130,8 +141,8 @@ void Exit::from_upstream(Session& s) {
             continue;
         uint64_t seq = s.seq++;
         for (size_t p = 0; p < max_paths; p++)
-            if (s.paths[p])
-                tx_.add(&*s.paths[p], {Type::data, uint8_t(p), s.id, seq}, pkt);
+            if (s.paths[p].addr)
+                tx_.add(&*s.paths[p].addr, {Type::data, uint8_t(p), s.id, seq}, pkt, mac_);
     }
     tx_.flush(listen_);
 }

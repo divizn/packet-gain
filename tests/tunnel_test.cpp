@@ -21,21 +21,42 @@ std::span<const std::byte> as_bytes(const std::string& s) { return std::as_bytes
 
 std::string as_string(std::span<const std::byte> b) { return {reinterpret_cast<const char*>(b.data()), b.size()}; }
 
+const pgain::Key key = pgain::parse_key(std::string(64, '7'));
+
+void send_raw(const pgain::Fd& fd, const std::string& bytes) {
+    pgain::SendBatch tx(1);
+    tx.add(nullptr, as_bytes(bytes));
+    tx.flush(fd);
+}
+
+std::string seal(uint32_t session, uint64_t seq, const std::string& payload) {
+    std::array<std::byte, pgain::header_size> header;
+    std::array<std::byte, pgain::tag_size> tag;
+    pgain::encode({pgain::Type::data, 0, session, seq}, header);
+    pgain::Mac(key).sign(header, as_bytes(payload), tag);
+    return as_string(header) + payload + as_string(tag);
+}
+
+std::vector<std::string> drain(const pgain::Fd& fd) {
+    pgain::RecvBatch rx;
+    std::vector<std::string> out;
+    size_t n = rx.recv(fd);
+    for (size_t i = 0; i < n; i++)
+        out.push_back(as_string(rx.packet(i)));
+    return out;
+}
+
 struct Rig {
     pgain::Fd echo = pgain::udp_bind(loopback());
-    pgain::Exit exit{loopback(), loopback(pgain::local_port(echo))};
+    pgain::Exit exit{key, loopback(), loopback(pgain::local_port(echo))};
     pgain::Client client;
     pgain::Fd app = pgain::udp_connect(loopback(client.port()));
     std::map<std::string, int> echoed, replies;
 
-    explicit Rig(size_t paths)
-        : client(loopback(), std::vector<sockaddr_in>(paths, loopback(exit.port()))) {}
+    explicit Rig(size_t paths, const pgain::Key& client_key = key)
+        : client(client_key, loopback(), std::vector<sockaddr_in>(paths, loopback(exit.port()))) {}
 
-    void send(const std::string& msg) {
-        pgain::SendBatch tx(1);
-        tx.add(nullptr, as_bytes(msg));
-        tx.flush(app);
-    }
+    void send(const std::string& msg) { send_raw(app, msg); }
 
     void pump(size_t want) {
         pgain::RecvBatch rx;
@@ -88,20 +109,105 @@ TEST_CASE("round_trip_over_each_path_count_delivers_every_packet_once") {
 TEST_CASE("exit_ignores_garbage_without_creating_sessions") {
     Rig r(1);
     pgain::Fd stranger = pgain::udp_connect(loopback(r.exit.port()));
-    std::string garbage = "not a tunnel packet";
-    pgain::SendBatch tx(1);
-    tx.add(nullptr, as_bytes(garbage));
-    tx.flush(stranger);
+    send_raw(stranger, "not a tunnel packet");
     r.exit.poll(100);
     CHECK(r.exit.sessions() == 0);
 }
 
+TEST_CASE("client_with_wrong_key_gets_nothing_through") {
+    Rig r(2, pgain::parse_key(std::string(64, '8')));
+    r.send("ping");
+    r.pump(1);
+    CHECK(r.echoed.empty());
+    CHECK(r.exit.sessions() == 0);
+}
+
+TEST_CASE("exit_drops_packet_with_any_byte_flipped") {
+    Rig r(1);
+    pgain::Fd fake = pgain::udp_connect(loopback(r.exit.port()));
+    std::string good = seal(42, 0, "payload");
+    for (size_t i = 0; i < good.size(); i++) {
+        std::string bad = good;
+        bad[i] ^= 1;
+        send_raw(fake, bad);
+    }
+    r.exit.poll(100);
+    CHECK(r.exit.sessions() == 0);
+    send_raw(fake, good);
+    r.exit.poll(100);
+    CHECK(r.exit.sessions() == 1);
+}
+
+TEST_CASE("replay_from_new_address_does_not_steal_return_path") {
+    Rig r(1);
+    pgain::Fd owner = pgain::udp_connect(loopback(r.exit.port()));
+    pgain::Fd thief = pgain::udp_connect(loopback(r.exit.port()));
+    std::string first = seal(42, 0, "hello");
+    send_raw(owner, first);
+    pgain::RecvBatch rx;
+    size_t n = 0;
+    for (int i = 0; i < 100 && n == 0; i++) {
+        r.exit.poll(10);
+        n = rx.recv(r.echo);
+    }
+    REQUIRE(n == 1);
+    sockaddr_in upstream = rx.from(0);
+    send_raw(thief, first);
+    r.exit.poll(100);
+
+    std::string push = "server push";
+    pgain::SendBatch tx(1);
+    tx.add(&upstream, as_bytes(push));
+    tx.flush(r.echo);
+    std::vector<std::string> got;
+    for (int i = 0; i < 100 && got.empty(); i++) {
+        r.exit.poll(10);
+        got = drain(owner);
+    }
+    CHECK(got.size() == 1);
+    CHECK(drain(thief).empty());
+}
+
 TEST_CASE("payload_round_trips_byte_for_byte") {
     Rig r(2);
-    std::string big(pgain::max_packet - pgain::header_size, '\0');
+    std::string big(pgain::max_payload, '\0');
     for (size_t i = 0; i < big.size(); i++)
         big[i] = char(i * 7);
     r.send(big);
     r.pump(1);
     CHECK(r.replies.count(big) == 1);
+}
+
+TEST_CASE("client_delivers_only_authentic_replies") {
+    pgain::Fd fake_exit = pgain::udp_bind(loopback());
+    pgain::Client client(key, loopback(), {loopback(pgain::local_port(fake_exit))});
+    pgain::Fd app = pgain::udp_connect(loopback(client.port()));
+    send_raw(app, "ping");
+    pgain::RecvBatch rx;
+    size_t n = 0;
+    for (int i = 0; i < 100 && n == 0; i++) {
+        client.poll(10);
+        n = rx.recv(fake_exit);
+    }
+    REQUIRE(n == 1);
+    auto h = pgain::decode(rx.packet(0));
+    REQUIRE(h);
+    sockaddr_in to = rx.from(0);
+
+    std::string forged = seal(h->session, 0, "forged");
+    forged.back() ^= 1;
+    std::string real = seal(h->session, 1, "real");
+    pgain::SendBatch tx(2);
+    tx.add(&to, as_bytes(forged));
+    tx.add(&to, as_bytes(real));
+    tx.flush(fake_exit);
+    std::vector<std::string> got;
+    for (int i = 0; i < 100 && got.empty(); i++) {
+        client.poll(10);
+        got = drain(app);
+    }
+    client.poll(50);
+    for (auto& m : drain(app))
+        got.push_back(m);
+    CHECK(got == std::vector<std::string>{"real"});
 }

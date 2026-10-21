@@ -1,5 +1,6 @@
 #pragma once
 
+#include <pgain/auth.hpp>
 #include <pgain/wire.hpp>
 
 #include <array>
@@ -43,6 +44,7 @@ uint16_t local_port(const Fd& fd);
 
 inline constexpr size_t batch_size = 32;
 inline constexpr size_t max_packet = 2048;
+inline constexpr size_t max_payload = max_packet - header_size - tag_size;
 
 class RecvBatch {
 public:
@@ -65,12 +67,13 @@ public:
     explicit SendBatch(size_t capacity);
 
     void add(const sockaddr_in* to, std::span<const std::byte> payload);
-    void add(const sockaddr_in* to, const Header& h, std::span<const std::byte> payload);
+    void add(const sockaddr_in* to, const Header& h, std::span<const std::byte> payload, Mac& mac);
     void flush(const Fd& fd);
 
 private:
     std::vector<std::array<std::byte, header_size>> headers_;
-    std::vector<std::array<iovec, 2>> iovs_;
+    std::vector<std::array<std::byte, tag_size>> tags_;
+    std::vector<std::array<iovec, 3>> iovs_;
     std::vector<mmsghdr> msgs_;
     size_t n_ = 0;
 };
