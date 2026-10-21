@@ -42,7 +42,7 @@ std::span<const std::byte> payload(std::span<const std::byte> pkt) {
 
 }
 
-Client::Client(const Key& key, const sockaddr_in& listen, const std::vector<sockaddr_in>& paths)
+Client::Client(const Key& key, const Address& listen, const std::vector<Address>& paths)
     : mac_(key), epoll_(make_epoll()), app_(udp_bind(listen)), session_(std::random_device{}()) {
     if (paths.empty() || paths.size() > max_paths)
         throw Error("need 1 to " + std::to_string(max_paths) + " paths");
@@ -87,7 +87,7 @@ void Client::from_path(size_t p) {
     tx_.flush(app_);
 }
 
-Exit::Exit(const Key& key, const sockaddr_in& listen, const sockaddr_in& target)
+Exit::Exit(const Key& key, const Address& listen, const Address& target)
     : mac_(key), target_(target), epoll_(make_epoll()), listen_(udp_bind(listen)) {
     watch(epoll_, listen_, {.ptr = nullptr});
 }

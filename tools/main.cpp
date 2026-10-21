@@ -25,7 +25,7 @@ int main(int argc, char** argv) try {
     auto key = pgain::load_key(argv[2]);
     auto listen = pgain::parse_address(argv[3]);
     if (mode == "client") {
-        std::vector<sockaddr_in> paths;
+        std::vector<pgain::Address> paths;
         for (int i = 4; i < argc; i++)
             paths.push_back(pgain::parse_address(argv[i]));
         pgain::Client c(key, listen, paths);

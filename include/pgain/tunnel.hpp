@@ -19,7 +19,7 @@ inline constexpr auto session_idle = std::chrono::seconds(60);
 
 class Client {
 public:
-    Client(const Key& key, const sockaddr_in& listen, const std::vector<sockaddr_in>& paths);
+    Client(const Key& key, const Address& listen, const std::vector<Address>& paths);
 
     void poll(int timeout_ms);
     uint16_t port() const { return local_port(app_); }
@@ -35,7 +35,7 @@ private:
     uint32_t session_;
     uint64_t seq_ = 0;
     Dedup dedup_;
-    std::optional<sockaddr_in> app_addr_;
+    std::optional<Address> app_addr_;
     RecvBatch app_rx_{max_payload};
     RecvBatch path_rx_;
     SendBatch tx_{batch_size};
@@ -43,7 +43,7 @@ private:
 
 class Exit {
 public:
-    Exit(const Key& key, const sockaddr_in& listen, const sockaddr_in& target);
+    Exit(const Key& key, const Address& listen, const Address& target);
 
     void poll(int timeout_ms);
     uint16_t port() const { return local_port(listen_); }
@@ -53,7 +53,7 @@ private:
     using Clock = std::chrono::steady_clock;
 
     struct Path {
-        std::optional<sockaddr_in> addr;
+        std::optional<Address> addr;
         uint64_t newest = 0;
     };
 
@@ -72,7 +72,7 @@ private:
     void expire(Clock::time_point now);
 
     Mac mac_;
-    sockaddr_in target_;
+    Address target_;
     Fd epoll_;
     Fd listen_;
     std::unordered_map<uint32_t, std::unique_ptr<Session>> sessions_;

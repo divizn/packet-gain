@@ -1,21 +1,17 @@
 #include <pgain/tunnel.hpp>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
-#include <arpa/inet.h>
 #include <chrono>
 #include <map>
 #include <string>
 
 namespace {
 
-sockaddr_in loopback(uint16_t port = 0) {
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    return addr;
-}
+pgain::Address loopback(uint16_t port = 0) { return pgain::parse_address("127.0.0.1:" + std::to_string(port)); }
+
+pgain::Address loopback6(uint16_t port = 0) { return pgain::parse_address("[::1]:" + std::to_string(port)); }
 
 std::span<const std::byte> as_bytes(const std::string& s) { return std::as_bytes(std::span(s)); }
 
@@ -54,7 +50,7 @@ struct Rig {
     std::map<std::string, int> echoed, replies;
 
     explicit Rig(size_t paths, const pgain::Key& client_key = key)
-        : client(client_key, loopback(), std::vector<sockaddr_in>(paths, loopback(exit.port()))) {}
+        : client(client_key, loopback(), std::vector<pgain::Address>(paths, loopback(exit.port()))) {}
 
     void send(const std::string& msg) { send_raw(app, msg); }
 
@@ -151,7 +147,7 @@ TEST_CASE("replay_from_new_address_does_not_steal_return_path") {
         n = rx.recv(r.echo);
     }
     REQUIRE(n == 1);
-    sockaddr_in upstream = rx.from(0);
+    pgain::Address upstream = rx.from(0);
     send_raw(thief, first);
     r.exit.poll(100);
 
@@ -192,7 +188,7 @@ TEST_CASE("client_delivers_only_authentic_replies") {
     REQUIRE(n == 1);
     auto h = pgain::decode(rx.packet(0));
     REQUIRE(h);
-    sockaddr_in to = rx.from(0);
+    pgain::Address to = rx.from(0);
 
     std::string forged = seal(h->session, 0, "forged");
     forged.back() ^= 1;
@@ -238,4 +234,33 @@ TEST_CASE("interleaved_sessions_reach_their_own_upstream") {
     CHECK(other_got.size() == 64);
     for (auto& msg : other_got)
         CHECK(msg[0] == 'b');
+}
+
+TEST_CASE("dual_stack_exit_serves_v4_and_v6_paths") {
+    auto families = GENERATE(std::string("6"), std::string("4"), std::string("64"));
+    pgain::Fd echo = pgain::udp_bind(loopback());
+    pgain::Exit exit(key, pgain::parse_address("[::]:0"), loopback(pgain::local_port(echo)));
+    std::vector<pgain::Address> paths;
+    for (char f : families)
+        paths.push_back(f == '6' ? loopback6(exit.port()) : loopback(exit.port()));
+    pgain::Client client(key, loopback6(), paths);
+    INFO("path families " << families);
+    pgain::Fd app = pgain::udp_connect(loopback6(client.port()));
+    send_raw(app, "ping");
+    pgain::RecvBatch rx;
+    std::vector<std::string> echoed, got;
+    for (int i = 0; i < 200 && got.empty(); i++) {
+        client.poll(1);
+        exit.poll(1);
+        size_t n = rx.recv(echo);
+        pgain::SendBatch tx(pgain::batch_size);
+        for (size_t j = 0; j < n; j++) {
+            echoed.push_back(as_string(rx.packet(j)));
+            tx.add(&rx.from(j), rx.packet(j));
+        }
+        tx.flush(echo);
+        got = drain(app);
+    }
+    CHECK(echoed == std::vector<std::string>{"ping"});
+    CHECK(got == std::vector<std::string>{"ping"});
 }

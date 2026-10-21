@@ -21,7 +21,14 @@ struct Error : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
-sockaddr_in parse_address(std::string_view host_port);
+struct Address {
+    sockaddr_storage storage{};
+    socklen_t len = 0;
+
+    const sockaddr* get() const { return reinterpret_cast<const sockaddr*>(&storage); }
+};
+
+Address parse_address(std::string_view host_port);
 
 class Fd {
 public:
@@ -38,8 +45,8 @@ private:
     int fd_;
 };
 
-Fd udp_bind(const sockaddr_in& addr);
-Fd udp_connect(const sockaddr_in& addr);
+Fd udp_bind(const Address& addr);
+Fd udp_connect(const Address& addr);
 uint16_t local_port(const Fd& fd);
 
 inline constexpr size_t batch_size = 32;
@@ -52,12 +59,12 @@ public:
 
     size_t recv(const Fd& fd);
     std::span<const std::byte> packet(size_t i) const { return {bufs_[i].data(), msgs_[i].msg_len}; }
-    const sockaddr_in& from(size_t i) const { return names_[i]; }
+    const Address& from(size_t i) const { return names_[i]; }
 
 private:
     size_t limit_;
     std::vector<std::array<std::byte, max_packet>> bufs_;
-    std::array<sockaddr_in, batch_size> names_;
+    std::array<Address, batch_size> names_;
     std::array<iovec, batch_size> iovs_;
     std::array<mmsghdr, batch_size> msgs_;
 };
@@ -66,8 +73,8 @@ class SendBatch {
 public:
     explicit SendBatch(size_t capacity);
 
-    void add(const sockaddr_in* to, std::span<const std::byte> payload);
-    void add(const sockaddr_in* to, const Header& h, std::span<const std::byte> payload, Mac& mac);
+    void add(const Address* to, std::span<const std::byte> payload);
+    void add(const Address* to, const Header& h, std::span<const std::byte> payload, Mac& mac);
     void flush(const Fd& fd);
 
 private:
