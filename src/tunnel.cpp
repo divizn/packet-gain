@@ -112,6 +112,7 @@ Exit::Session* Exit::session(uint32_t id, Clock::time_point now) {
 void Exit::from_tunnel() {
     size_t n = rx_.recv(listen_);
     auto now = Clock::now();
+    Session* pending = nullptr;
     for (size_t i = 0; i < n; i++) {
         auto pkt = rx_.packet(i);
         auto h = decode(pkt);
@@ -126,11 +127,15 @@ void Exit::from_tunnel() {
             path.newest = h->seq;
         }
         s->last_seen = now;
-        if (s->dedup.accept(h->seq)) {
-            auto body = payload(pkt);
-            send(s->upstream.get(), body.data(), body.size(), 0);
-        }
+        if (!s->dedup.accept(h->seq))
+            continue;
+        if (pending && pending != s)
+            upstream_tx_.flush(pending->upstream);
+        pending = s;
+        upstream_tx_.add(nullptr, payload(pkt));
     }
+    if (pending)
+        upstream_tx_.flush(pending->upstream);
 }
 
 void Exit::from_upstream(Session& s) {

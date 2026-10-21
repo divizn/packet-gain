@@ -79,6 +79,7 @@ private:
     RecvBatch rx_;
     RecvBatch upstream_rx_{max_payload};
     SendBatch tx_{batch_size * max_paths};
+    SendBatch upstream_tx_{batch_size};
     Clock::time_point last_sweep_ = Clock::now();
 };
 

@@ -211,3 +211,31 @@ TEST_CASE("client_delivers_only_authentic_replies") {
         got.push_back(m);
     CHECK(got == std::vector<std::string>{"real"});
 }
+
+TEST_CASE("interleaved_sessions_reach_their_own_upstream") {
+    Rig r(2);
+    pgain::Client other(key, loopback(), {loopback(r.exit.port()), loopback(r.exit.port())});
+    pgain::Fd other_app = pgain::udp_connect(loopback(other.port()));
+    std::vector<std::string> other_got;
+    for (int i = 0; i < 64; i++) {
+        r.send("a" + std::to_string(i));
+        send_raw(other_app, "b" + std::to_string(i));
+        if (i % 8 != 7)
+            continue;
+        other.poll(0);
+        r.pump(size_t(i + 1));
+        for (int j = 0; j < 20; j++) {
+            other.poll(0);
+            r.exit.poll(0);
+        }
+        for (auto& m : drain(other_app))
+            other_got.push_back(m);
+    }
+    CHECK(r.exit.sessions() == 2);
+    CHECK(r.replies.size() == 64);
+    for (auto& [msg, n] : r.replies)
+        CHECK(msg[0] == 'a');
+    CHECK(other_got.size() == 64);
+    for (auto& msg : other_got)
+        CHECK(msg[0] == 'b');
+}
