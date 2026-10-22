@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -88,6 +89,35 @@ private:
     RecvBatch upstream_rx_{max_payload};
     SendBatch tx_{batch_size * max_paths};
     SendBatch upstream_tx_{batch_size};
+    Clock::time_point last_sweep_ = Clock::now();
+};
+
+class Relay {
+public:
+    Relay(const Key& key, const Address& listen, const Address& next_hop);
+
+    void poll(int timeout_ms);
+    uint16_t port() const { return local_port(listen_); }
+    size_t flows() const { return flows_.size(); }
+
+private:
+    struct Flow {
+        Address from;
+        Fd upstream;
+        Clock::time_point last_seen;
+    };
+
+    Flow* flow(const Address& from, Clock::time_point now);
+    void from_down();
+    void from_up(Flow& f);
+
+    Mac mac_;
+    Address next_hop_;
+    Fd epoll_;
+    Fd listen_;
+    std::unordered_map<std::string, std::unique_ptr<Flow>> flows_;
+    RecvBatch rx_;
+    SendBatch tx_{batch_size};
     Clock::time_point last_sweep_ = Clock::now();
 };
 

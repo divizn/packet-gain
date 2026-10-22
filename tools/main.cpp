@@ -8,6 +8,7 @@ namespace {
 int usage() {
     std::fprintf(stderr, "usage: pgain genkey\n"
                          "       pgain client <keyfile> <listen> [--send N] <path>...\n"
+                         "       pgain relay <keyfile> <listen> <next-hop>\n"
                          "       pgain exit <keyfile> <listen> <target>\n");
     return 2;
 }
@@ -37,6 +38,11 @@ int main(int argc, char** argv) try {
         pgain::Client c(key, listen, paths, send);
         for (;;)
             c.poll(-1);
+    }
+    if (mode == "relay" && argc == 5) {
+        pgain::Relay r(key, listen, pgain::parse_address(argv[4]));
+        for (;;)
+            r.poll(1000);
     }
     if (mode == "exit" && argc == 5) {
         pgain::Exit e(key, listen, pgain::parse_address(argv[4]));

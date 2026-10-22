@@ -296,3 +296,58 @@ TEST_CASE("exit_stops_replying_on_paths_the_client_abandoned") {
     CHECK(drain(a).size() == 1);
     CHECK(drain(b).empty());
 }
+
+TEST_CASE("traffic_crosses_a_chain_of_relays_both_ways") {
+    pgain::Fd echo = pgain::udp_bind(loopback());
+    pgain::Exit exit(key, loopback(), loopback(pgain::local_port(echo)));
+    pgain::Relay far(key, loopback(), loopback(exit.port()));
+    pgain::Relay near(key, loopback(), loopback(far.port()));
+    pgain::Client client(key, loopback(), {loopback(near.port())});
+    pgain::Fd app = pgain::udp_connect(loopback(client.port()));
+    pgain::RecvBatch rx;
+    std::map<std::string, int> echoed, replies;
+    for (int i = 0; i < 40; i++) {
+        send_raw(app, "m" + std::to_string(i));
+        for (int j = 0; j < 30; j++) {
+            client.poll(0);
+            near.poll(0);
+            far.poll(0);
+            exit.poll(0);
+            size_t n = rx.recv(echo);
+            pgain::SendBatch tx(pgain::batch_size);
+            for (size_t k = 0; k < n; k++) {
+                echoed[as_string(rx.packet(k))]++;
+                tx.add(&rx.from(k), rx.packet(k));
+            }
+            tx.flush(echo);
+            for (auto& m : drain(app))
+                replies[m]++;
+        }
+    }
+    CHECK(echoed.size() == 40);
+    CHECK(replies.size() == 40);
+    for (auto& [m, n] : echoed)
+        CHECK(n == 1);
+    for (auto& [m, n] : replies)
+        CHECK(n == 1);
+    CHECK(near.flows() == 1);
+    CHECK(far.flows() == 1);
+    CHECK(exit.sessions() == 1);
+}
+
+TEST_CASE("relay_drops_unauthenticated_packets_without_opening_flows") {
+    pgain::Fd sink = pgain::udp_bind(loopback());
+    pgain::Relay relay(key, loopback(), loopback(pgain::local_port(sink)));
+    pgain::Fd stranger = pgain::udp_connect(loopback(relay.port()));
+    std::string forged = seal(42, 0, "payload");
+    forged.back() ^= 1;
+    send_raw(stranger, forged);
+    send_raw(stranger, "garbage");
+    relay.poll(100);
+    CHECK(relay.flows() == 0);
+    CHECK(drain(sink).empty());
+    send_raw(stranger, seal(42, 0, "payload"));
+    relay.poll(100);
+    CHECK(relay.flows() == 1);
+    CHECK(drain(sink).size() == 1);
+}

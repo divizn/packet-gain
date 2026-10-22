@@ -203,4 +203,58 @@ void Exit::expire(Clock::time_point now) {
     std::erase_if(sessions_, [now](auto& kv) { return now - kv.second->last_seen > session_idle; });
 }
 
+Relay::Relay(const Key& key, const Address& listen, const Address& next_hop)
+    : mac_(key), next_hop_(next_hop), epoll_(make_epoll()), listen_(udp_bind(listen)) {
+    watch(epoll_, listen_, {.ptr = nullptr});
+}
+
+void Relay::poll(int timeout_ms) {
+    wait(epoll_, timeout_ms, [this](epoll_data_t d) { d.ptr ? from_up(*static_cast<Flow*>(d.ptr)) : from_down(); });
+    auto now = Clock::now();
+    if (now - last_sweep_ < std::chrono::seconds(1))
+        return;
+    last_sweep_ = now;
+    std::erase_if(flows_, [now](auto& kv) { return now - kv.second->last_seen > session_idle; });
+}
+
+Relay::Flow* Relay::flow(const Address& from, Clock::time_point now) {
+    std::string id(reinterpret_cast<const char*>(&from.storage), from.len);
+    if (auto it = flows_.find(id); it != flows_.end())
+        return it->second.get();
+    if (flows_.size() >= max_sessions)
+        return nullptr;
+    auto f = std::make_unique<Flow>(Flow{from, udp_connect(next_hop_), now});
+    watch(epoll_, f->upstream, {.ptr = f.get()});
+    return flows_.emplace(std::move(id), std::move(f)).first->second.get();
+}
+
+void Relay::from_down() {
+    size_t n = rx_.recv(listen_);
+    auto now = Clock::now();
+    Flow* pending = nullptr;
+    for (size_t i = 0; i < n; i++) {
+        auto pkt = rx_.packet(i);
+        if (!decode(pkt) || pkt.size() < header_size + tag_size || !mac_.verify(pkt))
+            continue;
+        Flow* f = flow(rx_.from(i), now);
+        if (!f)
+            continue;
+        f->last_seen = now;
+        if (pending && pending != f)
+            tx_.flush(pending->upstream);
+        pending = f;
+        tx_.add(nullptr, pkt);
+    }
+    if (pending)
+        tx_.flush(pending->upstream);
+}
+
+void Relay::from_up(Flow& f) {
+    size_t n = rx_.recv(f.upstream);
+    for (size_t i = 0; i < n; i++)
+        if (auto pkt = rx_.packet(i); !pkt.empty())
+            tx_.add(&f.from, pkt);
+    tx_.flush(listen_);
+}
+
 }
