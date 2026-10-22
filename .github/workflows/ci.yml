@@ -9,7 +9,7 @@ jobs:
       matrix:
         sanitize: [OFF, ON]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: sudo apt-get install -y ninja-build libssl-dev
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DPGAIN_SANITIZE=${{ matrix.sanitize }}
       - run: cmake --build build
