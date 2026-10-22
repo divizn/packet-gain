@@ -42,19 +42,41 @@ std::span<const std::byte> payload(std::span<const std::byte> pkt) {
 
 }
 
-Client::Client(const Key& key, const Address& listen, const std::vector<Address>& paths)
-    : mac_(key), epoll_(make_epoll()), app_(udp_bind(listen)), session_(std::random_device{}()) {
+Client::Client(const Key& key, const Address& listen, const std::vector<Address>& paths, size_t send_paths)
+    : mac_(key), epoll_(make_epoll()), app_(udp_bind(listen)), session_(std::random_device{}()),
+      send_paths_(send_paths), monitors_(paths.size()) {
     if (paths.empty() || paths.size() > max_paths)
         throw Error("need 1 to " + std::to_string(max_paths) + " paths");
+    if (send_paths == 0)
+        throw Error("need to send on at least 1 path");
     watch(epoll_, app_, {.u64 = 0});
     for (auto& addr : paths) {
         paths_.push_back(udp_connect(addr));
         watch(epoll_, paths_.back(), {.u64 = paths_.size()});
+        active_.push_back(active_.size());
     }
 }
 
 void Client::poll(int timeout_ms) {
+    auto until_probe = std::chrono::ceil<std::chrono::milliseconds>(next_probe_ - Clock::now()).count();
+    if (timeout_ms < 0 || until_probe < timeout_ms)
+        timeout_ms = int(std::max<int64_t>(until_probe, 0));
     wait(epoll_, timeout_ms, [this](epoll_data_t d) { d.u64 == 0 ? from_app() : from_path(d.u64 - 1); });
+    if (auto now = Clock::now(); now >= next_probe_)
+        probe(now);
+}
+
+void Client::probe(Clock::time_point now) {
+    int64_t stamp = now.time_since_epoch().count();
+    std::span<const std::byte> body(reinterpret_cast<const std::byte*>(&stamp), sizeof(stamp));
+    for (size_t p = 0; p < paths_.size(); p++) {
+        monitors_[p].sent(probe_seq_);
+        tx_.add(nullptr, {Type::probe, uint8_t(p), session_, probe_seq_}, body, mac_);
+        tx_.flush(paths_[p]);
+    }
+    probe_seq_++;
+    next_probe_ = now + probe_interval;
+    active_ = choose(monitors_, send_paths_, active_, now);
 }
 
 void Client::from_app() {
@@ -63,7 +85,7 @@ void Client::from_app() {
         return;
     app_addr_ = app_rx_.from(n - 1);
     uint64_t next = seq_;
-    for (size_t p = 0; p < paths_.size(); p++) {
+    for (size_t p : active_) {
         next = seq_;
         for (size_t i = 0; i < n; i++)
             if (auto pkt = app_rx_.packet(i); !pkt.empty())
@@ -75,14 +97,21 @@ void Client::from_app() {
 
 void Client::from_path(size_t p) {
     size_t n = path_rx_.recv(paths_[p]);
-    if (!app_addr_)
-        return;
+    auto now = Clock::now();
     for (size_t i = 0; i < n; i++) {
         auto pkt = path_rx_.packet(i);
         auto h = decode(pkt);
-        if (h && h->session == session_ && pkt.size() >= header_size + tag_size && mac_.verify(pkt) &&
-            dedup_.accept(h->seq))
+        if (!h || h->session != session_ || pkt.size() < header_size + tag_size || !mac_.verify(pkt))
+            continue;
+        if (h->type == Type::probe_reply) {
+            int64_t stamp;
+            if (auto body = payload(pkt); body.size() == sizeof(stamp)) {
+                std::memcpy(&stamp, body.data(), sizeof(stamp));
+                monitors_[p].replied(h->seq, Clock::time_point(Clock::duration(stamp)), now);
+            }
+        } else if (h->type == Type::data && app_addr_ && dedup_.accept(h->seq)) {
             tx_.add(&*app_addr_, payload(pkt));
+        }
     }
     tx_.flush(app_);
 }
@@ -118,6 +147,12 @@ void Exit::from_tunnel() {
         auto h = decode(pkt);
         if (!h || h->path >= max_paths || pkt.size() < header_size + tag_size || !mac_.verify(pkt))
             continue;
+        if (h->type == Type::probe) {
+            tx_.add(&rx_.from(i), {Type::probe_reply, h->path, h->session, h->seq}, payload(pkt), mac_);
+            continue;
+        }
+        if (h->type != Type::data)
+            continue;
         Session* s = session(h->session, now);
         if (!s)
             continue;
@@ -126,6 +161,8 @@ void Exit::from_tunnel() {
             path.addr = rx_.from(i);
             path.newest = h->seq;
         }
+        if (path.addr == rx_.from(i))
+            path.seen = now;
         s->last_seen = now;
         if (!s->dedup.accept(h->seq))
             continue;
@@ -136,17 +173,24 @@ void Exit::from_tunnel() {
     }
     if (pending)
         upstream_tx_.flush(pending->upstream);
+    tx_.flush(listen_);
 }
 
 void Exit::from_upstream(Session& s) {
     size_t n = upstream_rx_.recv(s.upstream);
+    auto now = Clock::now();
+    size_t newest = 0;
+    for (size_t p = 1; p < max_paths; p++)
+        if (s.paths[p].addr && (!s.paths[newest].addr || s.paths[p].seen > s.paths[newest].seen))
+            newest = p;
+    auto use = [&](size_t p) { return s.paths[p].addr && (p == newest || now - s.paths[p].seen < path_idle); };
     for (size_t i = 0; i < n; i++) {
         auto pkt = upstream_rx_.packet(i);
         if (pkt.empty())
             continue;
         uint64_t seq = s.seq++;
         for (size_t p = 0; p < max_paths; p++)
-            if (s.paths[p].addr)
+            if (use(p))
                 tx_.add(&*s.paths[p].addr, {Type::data, uint8_t(p), s.id, seq}, pkt, mac_);
     }
     tx_.flush(listen_);

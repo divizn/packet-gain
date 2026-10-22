@@ -7,7 +7,7 @@ namespace {
 
 int usage() {
     std::fprintf(stderr, "usage: pgain genkey\n"
-                         "       pgain client <keyfile> <listen> <path>...\n"
+                         "       pgain client <keyfile> <listen> [--send N] <path>...\n"
                          "       pgain exit <keyfile> <listen> <target>\n");
     return 2;
 }
@@ -25,10 +25,16 @@ int main(int argc, char** argv) try {
     auto key = pgain::load_key(argv[2]);
     auto listen = pgain::parse_address(argv[3]);
     if (mode == "client") {
+        int first = 4;
+        size_t send = 2;
+        if (std::string_view(argv[4]) == "--send" && argc > 6) {
+            send = std::stoul(argv[5]);
+            first = 6;
+        }
         std::vector<pgain::Address> paths;
-        for (int i = 4; i < argc; i++)
+        for (int i = first; i < argc; i++)
             paths.push_back(pgain::parse_address(argv[i]));
-        pgain::Client c(key, listen, paths);
+        pgain::Client c(key, listen, paths, send);
         for (;;)
             c.poll(-1);
     }

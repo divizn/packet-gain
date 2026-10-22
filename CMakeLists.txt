@@ -14,7 +14,7 @@ endif()
 
 find_package(OpenSSL 3 REQUIRED)
 
-add_library(pgain_core src/wire.cpp src/dedup.cpp src/auth.cpp src/udp.cpp src/tunnel.cpp)
+add_library(pgain_core src/wire.cpp src/dedup.cpp src/auth.cpp src/udp.cpp src/paths.cpp src/tunnel.cpp)
 target_include_directories(pgain_core PUBLIC include)
 target_link_libraries(pgain_core PUBLIC OpenSSL::Crypto)
 target_compile_options(pgain_core PRIVATE -Wall -Wextra -Wpedantic)

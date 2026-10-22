@@ -2,6 +2,7 @@
 
 #include <pgain/udp.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <optional>
@@ -24,6 +25,7 @@ public:
 
     void poll(int timeout_ms);
     uint16_t port() const { return local_port(down_); }
+    void set_loss(double loss) { loss_ = loss; }
 
 private:
     using Clock = std::chrono::steady_clock;
@@ -39,6 +41,7 @@ private:
     void release();
 
     Impairment imp_;
+    std::atomic<double> loss_;
     std::mt19937_64 rng_;
     Fd down_;
     Fd up_;

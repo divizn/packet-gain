@@ -5,7 +5,7 @@
 namespace pgain {
 
 Impairer::Impairer(const Address& listen, const Address& target, const Impairment& imp, uint64_t seed)
-    : imp_(imp), rng_(seed), down_(udp_bind(listen)), up_(udp_connect(target)) {}
+    : imp_(imp), loss_(imp.loss), rng_(seed), down_(udp_bind(listen)), up_(udp_connect(target)) {}
 
 void Impairer::poll(int timeout_ms) {
     if (!queue_.empty()) {
@@ -32,7 +32,7 @@ void Impairer::admit(const RecvBatch& rx, size_t n, bool upward) {
     auto now = Clock::now();
     for (size_t i = 0; i < n; i++) {
         auto pkt = rx.packet(i);
-        if (coin(rng_) < imp_.loss)
+        if (coin(rng_) < loss_)
             continue;
         int copies = coin(rng_) < imp_.duplicate ? 2 : 1;
         for (int c = 0; c < copies; c++)

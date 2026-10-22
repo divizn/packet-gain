@@ -12,6 +12,8 @@ inline constexpr size_t header_size = 16;
 
 enum class Type : uint8_t {
     data = 1,
+    probe = 2,
+    probe_reply = 3,
 };
 
 struct Header {

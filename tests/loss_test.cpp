@@ -25,7 +25,7 @@ double one_way_loss(size_t paths, double loss, int packets) {
                                                           pgain::Impairment{loss, 0.05, {}, {}}, 7 + i));
         addrs.push_back(loopback(links.back()->port()));
     }
-    pgain::Client client(key, loopback(), addrs);
+    pgain::Client client(key, loopback(), addrs, paths);
     pgain::Fd app = pgain::udp_connect(loopback(client.port()));
     pgain::RecvBatch rx;
     std::set<std::string> seen;
@@ -65,4 +65,58 @@ TEST_CASE("multipath_cuts_one_way_loss_to_about_p_to_the_k") {
     double measured = one_way_loss(paths, p, 3000);
     INFO(paths << " paths, measured " << measured << ", expected " << expected);
     CHECK(std::abs(measured - expected) < 4 * std::sqrt(expected * (1 - expected) / 3000) + 0.002);
+}
+
+TEST_CASE("client_fails_over_when_its_best_path_goes_dark") {
+    using namespace std::chrono;
+    auto key = pgain::parse_key(std::string(64, '5'));
+    pgain::Fd echo = pgain::udp_bind(loopback());
+    pgain::Exit exit(key, loopback(), loopback(pgain::local_port(echo)));
+    std::vector<std::unique_ptr<pgain::Impairer>> links;
+    std::vector<pgain::Address> addrs;
+    for (int ms : {1, 5, 10}) {
+        links.push_back(std::make_unique<pgain::Impairer>(
+            loopback(), loopback(exit.port()), pgain::Impairment{0, 0, milliseconds(ms), {}}, 1));
+        addrs.push_back(loopback(links.back()->port()));
+    }
+    pgain::Client client(key, loopback(), addrs, 1);
+    pgain::Fd app = pgain::udp_connect(loopback(client.port()));
+    pgain::RecvBatch rx;
+    std::set<int> delivered;
+    int sent = 0;
+    auto run_for = [&](milliseconds d) {
+        auto end = steady_clock::now() + d;
+        while (steady_clock::now() < end) {
+            std::string msg = std::to_string(sent++);
+            pgain::SendBatch tx(1);
+            tx.add(nullptr, std::as_bytes(std::span(msg)));
+            tx.flush(app);
+            auto tick = steady_clock::now() + milliseconds(2);
+            while (steady_clock::now() < tick) {
+                client.poll(0);
+                for (auto& l : links)
+                    l->poll(0);
+                exit.poll(0);
+                size_t n = rx.recv(echo);
+                for (size_t i = 0; i < n; i++) {
+                    auto p = rx.packet(i);
+                    delivered.insert(std::stoi(std::string(reinterpret_cast<const char*>(p.data()), p.size())));
+                }
+            }
+        }
+    };
+    run_for(milliseconds(1000));
+    REQUIRE(client.active() == std::vector<size_t>{0});
+    links[0]->set_loss(1);
+    int cut = sent;
+    run_for(milliseconds(1000));
+    CHECK(client.active() == std::vector<size_t>{1});
+    int lost = 0;
+    for (int s = cut; s < sent - 20; s++)
+        lost += !delivered.count(s);
+    INFO("lost " << lost << " of " << sent - 20 - cut << " packets after the cut");
+    CHECK(lost > 0);
+    CHECK(lost * 2 < 400);
+    for (int s = cut + 200; s < sent - 20; s++)
+        CHECK(delivered.count(s) == 1);
 }

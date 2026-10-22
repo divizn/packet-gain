@@ -1,6 +1,7 @@
 #pragma once
 
 #include <pgain/dedup.hpp>
+#include <pgain/paths.hpp>
 #include <pgain/udp.hpp>
 
 #include <array>
@@ -16,17 +17,20 @@ namespace pgain {
 inline constexpr size_t max_paths = 8;
 inline constexpr size_t max_sessions = 4096;
 inline constexpr auto session_idle = std::chrono::seconds(60);
+inline constexpr auto path_idle = std::chrono::seconds(1);
 
 class Client {
 public:
-    Client(const Key& key, const Address& listen, const std::vector<Address>& paths);
+    Client(const Key& key, const Address& listen, const std::vector<Address>& paths, size_t send_paths = 2);
 
     void poll(int timeout_ms);
     uint16_t port() const { return local_port(app_); }
+    const std::vector<size_t>& active() const { return active_; }
 
 private:
     void from_app();
     void from_path(size_t p);
+    void probe(Clock::time_point now);
 
     Mac mac_;
     Fd epoll_;
@@ -36,6 +40,11 @@ private:
     uint64_t seq_ = 0;
     Dedup dedup_;
     std::optional<Address> app_addr_;
+    size_t send_paths_;
+    std::vector<PathMonitor> monitors_;
+    std::vector<size_t> active_;
+    uint64_t probe_seq_ = 0;
+    Clock::time_point next_probe_ = Clock::now();
     RecvBatch app_rx_{max_payload};
     RecvBatch path_rx_;
     SendBatch tx_{batch_size};
@@ -50,11 +59,10 @@ public:
     size_t sessions() const { return sessions_.size(); }
 
 private:
-    using Clock = std::chrono::steady_clock;
-
     struct Path {
         std::optional<Address> addr;
         uint64_t newest = 0;
+        Clock::time_point seen;
     };
 
     struct Session {

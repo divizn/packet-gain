@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstring>
 #include <memory>
 #include <netinet/in.h>
 #include <span>
@@ -26,6 +27,7 @@ struct Address {
     socklen_t len = 0;
 
     const sockaddr* get() const { return reinterpret_cast<const sockaddr*>(&storage); }
+    bool operator==(const Address& o) const { return len == o.len && std::memcmp(&storage, &o.storage, len) == 0; }
 };
 
 Address parse_address(std::string_view host_port);

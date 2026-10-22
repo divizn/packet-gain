@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <ctime>
 #include <map>
 #include <memory>
@@ -31,6 +32,7 @@ struct Options {
     size_t size = 64;
     size_t paths = 3;
     uint64_t seed = 1;
+    uint64_t runs = 5;
 };
 
 Address loopback(uint16_t port = 0) { return pgain::parse_address("127.0.0.1:" + std::to_string(port)); }
@@ -103,13 +105,15 @@ double percentile(std::vector<double>& v, double p) {
 struct Flow {
     uint64_t sent = 0;
     std::vector<double> rtt_us;
+    std::vector<bool> got;
 };
 
-Flow paced_flow(const Address& entry, const Options& o) {
+Flow paced_flow(const Address& entry, const Options& o, const std::function<void(uint64_t)>& before_send = {}) {
     pgain::Fd app = pgain::udp_connect(entry);
     std::map<uint64_t, int64_t> sent_at;
     std::mutex mu;
     Flow flow;
+    flow.got.resize(uint64_t(o.rate * o.seconds));
     std::jthread receiver([&](std::stop_token st) {
         pgain::RecvBatch rx;
         while (!st.stop_requested()) {
@@ -124,6 +128,7 @@ Flow paced_flow(const Address& entry, const Options& o) {
                 std::memcpy(&seq, rx.packet(i).data(), sizeof(seq));
                 if (auto it = sent_at.find(seq); it != sent_at.end()) {
                     flow.rtt_us.push_back(double(at - it->second) / 1e3);
+                    flow.got[seq] = true;
                     sent_at.erase(it);
                 }
             }
@@ -135,6 +140,8 @@ Flow paced_flow(const Address& entry, const Options& o) {
     auto total = uint64_t(o.rate * o.seconds);
     for (uint64_t seq = 0; seq < total; seq++) {
         std::this_thread::sleep_until(start + duration_cast<steady_clock::duration>(interval * double(seq)));
+        if (before_send)
+            before_send(seq);
         std::memcpy(payload.data(), &seq, sizeof(seq));
         {
             std::lock_guard lock(mu);
@@ -203,6 +210,50 @@ int loss_bench(const Options& o) {
     return 0;
 }
 
+int failover_bench(const Options& o) {
+    auto key = pgain::parse_key(pgain::generate_key());
+    std::printf("3 paths at %.0f/%.0f/%.0fms one-way, sending on 1, %.0f pps; path 0 cut halfway through\n",
+                o.delay_ms, 2 * o.delay_ms, 3 * o.delay_ms, o.rate);
+    std::printf("%-6s %10s %14s %16s\n", "run", "lost", "outage ms", "active after");
+    for (uint64_t run = 0; run < o.runs; run++) {
+        Echo echo(true);
+        pgain::Exit exit(key, loopback(), loopback(pgain::local_port(echo.fd)));
+        std::vector<std::unique_ptr<pgain::Impairer>> links;
+        std::vector<Address> paths;
+        for (int i = 1; i <= 3; i++) {
+            auto delay = duration_cast<microseconds>(duration<double, std::milli>(o.delay_ms * i));
+            links.push_back(std::make_unique<pgain::Impairer>(loopback(), loopback(exit.port()),
+                                                              pgain::Impairment{0, 0, delay, {}}, o.seed + run));
+            paths.push_back(loopback(links.back()->port()));
+        }
+        pgain::Client client(key, loopback(), paths, 1);
+        Runner r;
+        r.run(echo);
+        r.run(exit);
+        r.run(client);
+        for (auto& l : links)
+            r.run(*l);
+        uint64_t cut = uint64_t(o.rate * o.seconds / 2);
+        auto f = paced_flow(loopback(client.port()), o, [&](uint64_t seq) {
+            if (seq == cut)
+                links[0]->set_loss(1);
+        });
+        r.stop();
+        uint64_t lost = 0, run_len = 0, longest = 0;
+        for (uint64_t s = cut; s < f.sent; s++) {
+            run_len = f.got[s] ? 0 : run_len + 1;
+            longest = std::max(longest, run_len);
+            lost += !f.got[s];
+        }
+        std::string active;
+        for (size_t p : client.active())
+            active += std::to_string(p) + " ";
+        std::printf("%-6llu %10llu %14.0f %16s\n", (unsigned long long)run, (unsigned long long)lost,
+                    1000.0 * double(longest) / o.rate, active.c_str());
+    }
+    return 0;
+}
+
 int throughput_bench(const Options& o) {
     auto key = pgain::parse_key(pgain::generate_key());
     Echo echo(false);
@@ -240,7 +291,8 @@ int throughput_bench(const Options& o) {
 int usage() {
     std::fprintf(stderr, "usage: pgain-bench loss [--loss P] [--delay-ms D] [--jitter-ms J] [--rate PPS] [--seconds S]\n"
                          "                        [--size B] [--paths K] [--seed N]\n"
-                         "       pgain-bench throughput [--seconds S] [--size B] [--paths K]\n");
+                         "       pgain-bench throughput [--seconds S] [--size B] [--paths K]\n"
+                         "       pgain-bench failover [--delay-ms D] [--rate PPS] [--seconds S] [--runs N]\n");
     return 2;
 }
 
@@ -261,6 +313,7 @@ int main(int argc, char** argv) try {
         else if (flag == "--size") o.size = size_t(v);
         else if (flag == "--paths") o.paths = size_t(v);
         else if (flag == "--seed") o.seed = uint64_t(v);
+        else if (flag == "--runs") o.runs = uint64_t(v);
         else return usage();
     }
     if (argc % 2)
@@ -270,6 +323,8 @@ int main(int argc, char** argv) try {
         return loss_bench(o);
     if (mode == "throughput")
         return throughput_bench(o);
+    if (mode == "failover")
+        return failover_bench(o);
     return usage();
 } catch (const std::exception& e) {
     std::fprintf(stderr, "pgain-bench: %s\n", e.what());

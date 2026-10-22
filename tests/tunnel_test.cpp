@@ -6,6 +6,7 @@
 #include <chrono>
 #include <map>
 #include <string>
+#include <thread>
 
 namespace {
 
@@ -25,10 +26,10 @@ void send_raw(const pgain::Fd& fd, const std::string& bytes) {
     tx.flush(fd);
 }
 
-std::string seal(uint32_t session, uint64_t seq, const std::string& payload) {
+std::string seal(uint32_t session, uint64_t seq, const std::string& payload, uint8_t path = 0) {
     std::array<std::byte, pgain::header_size> header;
     std::array<std::byte, pgain::tag_size> tag;
-    pgain::encode({pgain::Type::data, 0, session, seq}, header);
+    pgain::encode({pgain::Type::data, path, session, seq}, header);
     pgain::Mac(key).sign(header, as_bytes(payload), tag);
     return as_string(header) + payload + as_string(tag);
 }
@@ -185,7 +186,7 @@ TEST_CASE("client_delivers_only_authentic_replies") {
         client.poll(10);
         n = rx.recv(fake_exit);
     }
-    REQUIRE(n == 1);
+    REQUIRE(n >= 1);
     auto h = pgain::decode(rx.packet(0));
     REQUIRE(h);
     pgain::Address to = rx.from(0);
@@ -263,4 +264,35 @@ TEST_CASE("dual_stack_exit_serves_v4_and_v6_paths") {
     }
     CHECK(echoed == std::vector<std::string>{"ping"});
     CHECK(got == std::vector<std::string>{"ping"});
+}
+
+TEST_CASE("exit_stops_replying_on_paths_the_client_abandoned") {
+    Rig r(1);
+    pgain::Fd a = pgain::udp_connect(loopback(r.exit.port()));
+    pgain::Fd b = pgain::udp_connect(loopback(r.exit.port()));
+    pgain::RecvBatch rx;
+    auto bounce = [&] {
+        size_t n = 0;
+        for (int i = 0; i < 100 && n == 0; i++) {
+            r.exit.poll(10);
+            n = rx.recv(r.echo);
+        }
+        REQUIRE(n >= 1);
+        pgain::SendBatch tx(pgain::batch_size);
+        for (size_t i = 0; i < n; i++)
+            tx.add(&rx.from(i), rx.packet(i));
+        tx.flush(r.echo);
+        for (int i = 0; i < 10; i++)
+            r.exit.poll(10);
+    };
+    send_raw(a, seal(42, 0, "x", 0));
+    send_raw(b, seal(42, 1, "y", 1));
+    bounce();
+    CHECK_FALSE(drain(a).empty());
+    CHECK_FALSE(drain(b).empty());
+    std::this_thread::sleep_for(pgain::path_idle + std::chrono::milliseconds(100));
+    send_raw(a, seal(42, 2, "z", 0));
+    bounce();
+    CHECK(drain(a).size() == 1);
+    CHECK(drain(b).empty());
 }

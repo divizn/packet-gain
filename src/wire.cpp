@@ -33,7 +33,7 @@ std::optional<Header> decode(std::span<const std::byte> packet) {
     if (packet.size() < header_size || uint8_t(packet[0]) != wire_version)
         return std::nullopt;
     auto type = Type(packet[1]);
-    if (type != Type::data)
+    if (type != Type::data && type != Type::probe && type != Type::probe_reply)
         return std::nullopt;
     return Header{type, uint8_t(packet[2]), get_be<uint32_t>(&packet[4]), get_be<uint64_t>(&packet[8])};
 }
