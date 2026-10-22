@@ -23,6 +23,15 @@ add_executable(pgain tools/main.cpp)
 target_link_libraries(pgain PRIVATE pgain_core)
 target_compile_options(pgain PRIVATE -Wall -Wextra -Wpedantic)
 
+add_library(pgain_bench_support bench/impair.cpp)
+target_include_directories(pgain_bench_support PUBLIC bench)
+target_link_libraries(pgain_bench_support PUBLIC pgain_core)
+target_compile_options(pgain_bench_support PRIVATE -Wall -Wextra -Wpedantic)
+
+add_executable(pgain-bench bench/main.cpp)
+target_link_libraries(pgain-bench PRIVATE pgain_bench_support)
+target_compile_options(pgain-bench PRIVATE -Wall -Wextra -Wpedantic)
+
 include(CTest)
 if(BUILD_TESTING)
   add_subdirectory(tests)
