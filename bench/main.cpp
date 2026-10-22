@@ -195,7 +195,7 @@ int loss_bench(const Options& o) {
                                                               o.seed * 1000 + k * 10 + i));
             paths.push_back(loopback(links.back()->port()));
         }
-        pgain::Client client(key, loopback(), paths);
+        pgain::Client client(key, loopback(), paths, k);
         Runner r;
         r.run(echo);
         r.run(exit);
@@ -254,11 +254,39 @@ int failover_bench(const Options& o) {
     return 0;
 }
 
+int relay_bench(const Options& o) {
+    auto key = pgain::parse_key(pgain::generate_key());
+    std::printf("one path through 0 to %zu relays, no impairment, %.0f pps, %.0fs\n", o.paths, o.rate, o.seconds);
+    std::printf("%-10s %8s %10s %10s\n", "relays", "sent", "p50 us", "p99 us");
+    for (size_t hops = 0; hops <= o.paths; hops++) {
+        Echo echo(true);
+        pgain::Exit exit(key, loopback(), loopback(pgain::local_port(echo.fd)));
+        std::vector<std::unique_ptr<pgain::Relay>> relays;
+        uint16_t next = exit.port();
+        for (size_t h = 0; h < hops; h++) {
+            relays.push_back(std::make_unique<pgain::Relay>(key, loopback(), loopback(next)));
+            next = relays.back()->port();
+        }
+        pgain::Client client(key, loopback(), {loopback(next)}, 1);
+        Runner r;
+        r.run(echo);
+        r.run(exit);
+        r.run(client);
+        for (auto& relay : relays)
+            r.run(*relay);
+        auto f = paced_flow(loopback(client.port()), o);
+        r.stop();
+        std::printf("%-10zu %8llu %10.0f %10.0f\n", hops, (unsigned long long)f.sent, percentile(f.rtt_us, 0.5),
+                    percentile(f.rtt_us, 0.99));
+    }
+    return 0;
+}
+
 int throughput_bench(const Options& o) {
     auto key = pgain::parse_key(pgain::generate_key());
     Echo echo(false);
     pgain::Exit exit(key, loopback(), loopback(pgain::local_port(echo.fd)));
-    pgain::Client client(key, loopback(), std::vector<Address>(o.paths, loopback(exit.port())));
+    pgain::Client client(key, loopback(), std::vector<Address>(o.paths, loopback(exit.port())), o.paths);
     Runner r;
     r.run(echo);
     auto exit_cpu = r.run(exit);
@@ -292,6 +320,7 @@ int usage() {
     std::fprintf(stderr, "usage: pgain-bench loss [--loss P] [--delay-ms D] [--jitter-ms J] [--rate PPS] [--seconds S]\n"
                          "                        [--size B] [--paths K] [--seed N]\n"
                          "       pgain-bench throughput [--seconds S] [--size B] [--paths K]\n"
+                         "       pgain-bench relay [--paths MAX_HOPS] [--rate PPS] [--seconds S]\n"
                          "       pgain-bench failover [--delay-ms D] [--rate PPS] [--seconds S] [--runs N]\n");
     return 2;
 }
@@ -323,6 +352,8 @@ int main(int argc, char** argv) try {
         return loss_bench(o);
     if (mode == "throughput")
         return throughput_bench(o);
+    if (mode == "relay")
+        return relay_bench(o);
     if (mode == "failover")
         return failover_bench(o);
     return usage();
